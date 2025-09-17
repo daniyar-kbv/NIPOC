@@ -120,7 +120,7 @@ extension PeerService: MCSessionDelegate, MCNearbyServiceAdvertiserDelegate, MCN
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
 }
 
-final class NIManager: NSObject, ObservableObject, NISessionDelegate {
+final class NIManager: NSObject, ObservableObject {
     private let session = NISession()
     private let peerService = PeerService()
 
@@ -159,7 +159,9 @@ final class NIManager: NSObject, ObservableObject, NISessionDelegate {
         log("Running NISession with NINearbyPeerConfiguration")
         session.run(config)
     }
+}
 
+extension NIManager: NISessionDelegate {
     func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
         guard let obj = nearbyObjects.first else { return }
         let distance = String(format: "%.2f", obj.distance ?? -1)
