@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Devices are discovered using local network</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_uwb-demo._tcp</string>
+	</array>
+	<key>NSNearbyInteractionUsageDescription</key>
+	<string>Nearby Interaction is needed to exchange direction data</string>
+</dict>
+</plist>

@@ -2,23 +2,195 @@
 //  ContentView.swift
 //  NIPOC
 //
-//  Created by Daniyar Kurmanbayev on 2025-09-17.
+//  Created by Daniyar Kurmanbayev on 2025-09-15.
 //
 
 import SwiftUI
+import NearbyInteraction
+import MultipeerConnectivity
+import simd
+import OSLog
 
-struct ContentView: View {
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+private let osLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "NIPOC", category: "general")
+@inline(__always)
+func log(_ message: String, level: OSLogType = .info) {
+    osLogger.log(level: level, "\(message, privacy: .public)")
+}
+
+final class PeerService: NSObject, ObservableObject {
+    private let service = "uwb-demo"
+    private let myPeer = PeerService.makePeerID()
+    private lazy var session = MCSession(peer: myPeer, securityIdentity: nil, encryptionPreference: .required)
+    private lazy var advertiser = MCNearbyServiceAdvertiser(peer: myPeer, discoveryInfo: nil, serviceType: service)
+    private lazy var browser = MCNearbyServiceBrowser(peer: myPeer, serviceType: service)
+
+    var onTokenReceived: ((NIDiscoveryToken) -> Void)?
+    var onConnected: (() -> Void)?
+
+    override init() {
+        super.init()
+        
+        log("PeerService init — peer=\(myPeer.displayName), service=\(service)")
+        
+        session.delegate = self
+        advertiser.delegate = self
+        browser.delegate = self
+        
+        advertiser.startAdvertisingPeer()
+        browser.startBrowsingForPeers()
+        
+        log("Started advertising and browsing")
+    }
+
+    func send(token: NIDiscoveryToken) {
+        guard !session.connectedPeers.isEmpty else {
+            log("Attempted to send token but no connected peers", level: .default)
+            return
         }
-        .padding()
+        
+        log("Sending my discovery token", level: .info)
+        
+        do {
+            let data = try NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
+            try session.send(data, toPeers: session.connectedPeers, with: .reliable)
+            log("Sent discovery token to \(session.connectedPeers.count) peer(s)", level: .info)
+        } catch {
+            log("Failed to send discovery token — error=\(error.localizedDescription)", level: .error)
+        }
+    }
+
+    private static func makePeerID() -> MCPeerID {
+        let device = UIDevice.current.model
+        let suffix = String(format: "%04X", UInt16.random(in: UInt16.min...UInt16.max))
+        let name = "UWB-\(device)-\(suffix)"
+        return MCPeerID(displayName: name)
     }
 }
 
-#Preview {
-    ContentView()
+extension PeerService: MCSessionDelegate, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBrowserDelegate {
+    func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
+        log("MCSession state changed — peer=\(peerID.displayName) state=\(stateName(state))")
+        
+        if state == .connected {
+            DispatchQueue.main.async { self.onConnected?() }
+        }
+        
+        func stateName(_ s: MCSessionState) -> String {
+            switch s {
+            case .notConnected: return "notConnected"
+            case .connecting: return "connecting"
+            case .connected: return "connected"
+            @unknown default: return "unknown"
+            }
+        }
+    }
+    
+    func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        if let token = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: data) {
+            log("Received discovery token from peer=\(peerID.displayName)")
+            DispatchQueue.main.async { self.onTokenReceived?(token) }
+        }
+    }
+    
+    func session(_ session: MCSession, didReceive stream: InputStream, withName: String, fromPeer: MCPeerID) { }
+    func session(_ session: MCSession, didStartReceivingResourceWithName: String, fromPeer: MCPeerID, with: Progress) { }
+    func session(_ session: MCSession, didFinishReceivingResourceWithName: String, fromPeer: MCPeerID, at: URL?, withError: Error?) { }
+
+    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID,
+                    withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
+        log("Received invitation from peer=\(peerID.displayName) — accepting")
+        invitationHandler(true, session)
+    }
+
+    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
+        log("Advertiser failed to start — error=\(error.localizedDescription)", level: .error)
+    }
+
+    func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo: [String : String]?) {
+        if peerID != myPeer {
+            log("Found peer=\(peerID.displayName). Inviting…")
+            browser.invitePeer(peerID, to: session, withContext: nil, timeout: 20)
+        }
+    }
+    
+    func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+        log("Browser failed to start — error=\(error.localizedDescription)", level: .error)
+    }
+    
+    func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
+}
+
+final class NIManager: NSObject, ObservableObject, NISessionDelegate {
+    private let session = NISession()
+    private let peerService = PeerService()
+
+    override init() {
+        super.init()
+        
+        session.delegate = self
+        
+        if let _ = session.discoveryToken {
+            log("My discoveryToken is available on init")
+        }
+        
+        peerService.onTokenReceived = { [weak self] peerToken in
+            log("onTokenReceived — running NI session with peer token")
+            self?.run(with: peerToken)
+        }
+        
+        peerService.onConnected = { [weak self] in
+            guard let self, let token = self.session.discoveryToken else { return }
+            log("onPeerConnected — attempting to send my discovery token")
+            self.peerService.send(token: token)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            log("Will retry sending discovery token later")
+            
+            if let token = self?.session.discoveryToken {
+                log("Sending my discovery token")
+                self?.peerService.send(token: token)
+            }
+        }
+    }
+
+    private func run(with peerToken: NIDiscoveryToken) {
+        let config = NINearbyPeerConfiguration(peerToken: peerToken)
+        log("Running NISession with NINearbyPeerConfiguration")
+        session.run(config)
+    }
+
+    func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
+        guard let obj = nearbyObjects.first else { return }
+        let distance = String(format: "%.2f", obj.distance ?? -1)
+        let direction = obj.direction ?? simd_float3(repeating: -1)
+        log("Did update nearby objects — distance=\(distance)m direction=[\(String(format:"%.2f", direction.x)), \(String(format:"%.2f", direction.y)), \(String(format:"%.2f", direction.z))]")
+    }
+
+    func sessionWasSuspended(_ session: NISession) {
+        log("NISession was suspended", level: .default)
+    }
+    
+    func sessionSuspensionEnded(_ session: NISession) {
+        if let config = session.configuration { session.run(config) }
+    }
+
+    func session(_ session: NISession, didInvalidateWith error: Error) {
+        log("NISession invalidated — error=\(error.localizedDescription)", level: .error)
+        
+        if let token = session.discoveryToken {
+            log("NISession invalidated — re-sending discovery token if possible", level: .default)
+            peerService.send(token: token)
+        }
+    }
+}
+
+struct ContentView: View {
+    @StateObject private var ni = NIManager()
+
+    var body: some View {
+        VStack {
+            Text("NI POC")
+        }
+    }
 }
