@@ -27,7 +27,7 @@ final class PeerService: NSObject, ObservableObject {
     private lazy var browser = MCNearbyServiceBrowser(peer: myPeer, serviceType: service)
 
     var onTokenReceived: ((NIDiscoveryToken) -> Void)?
-    var onConnected: (() -> Void)?
+    var onConnectionStateChanged: ((MCSessionState) -> Void)?
 
     override init() {
         super.init()
@@ -102,20 +102,8 @@ extension PeerService {
 
 extension PeerService: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
-        Logger.log("MCSession state changed — peer=\(peerID.displayName) state=\(stateName(state))")
-        
-        if state == .connected {
-            DispatchQueue.main.async { self.onConnected?() }
-        }
-        
-        func stateName(_ s: MCSessionState) -> String {
-            switch s {
-            case .notConnected: return "notConnected"
-            case .connecting: return "connecting"
-            case .connected: return "connected"
-            @unknown default: return "unknown"
-            }
-        }
+        Logger.log("MCSession state changed — peer=\(peerID.displayName) state=\(state.description)")
+        DispatchQueue.main.async { self.onConnectionStateChanged?(state) }
     }
     
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
@@ -156,11 +144,16 @@ final class NIManager: NSObject, ObservableObject {
             self?.run(with: peerToken)
         }
         
-        peerService.onConnected = { [weak self] in
+        peerService.onConnectionStateChanged = { [weak self] state in
             guard let self, let token = self.session.discoveryToken else { return }
-            Logger.log("onPeerConnected — attempting to send my discovery token")
-            state = .connected
-            self.peerService.send(token: token)
+            
+            switch state {
+            case .connected:
+                Logger.log("onPeerConnected — attempting to send my discovery token")
+                self.peerService.send(token: token)
+            default:
+                self.state = .searching
+            }
         }
     }
 
@@ -168,6 +161,7 @@ final class NIManager: NSObject, ObservableObject {
         let config = NINearbyPeerConfiguration(peerToken: peerToken)
         Logger.log("Running NISession with NINearbyPeerConfiguration")
         session.run(config)
+        state = .connected
     }
 }
 
@@ -192,7 +186,6 @@ extension NIManager: NISessionDelegate {
         Logger.log("NISession suspension ended", level: .default)
         if let config = session.configuration {
             Logger.log("Resuming NISession with previous configuration", level: .default)
-            state = .connected
             session.run(config)
         } else {
             Logger.log("No previous configuration found.", level: .default)
@@ -223,6 +216,17 @@ extension NIManager {
         case .searching: return "Searching"
         case .connected: return "Connected"
         case .suspended: return "Suspended"
+        }
+    }
+}
+
+extension MCSessionState {
+    var description: String {
+        switch self {
+        case .notConnected: return "Not Connected"
+        case .connecting: return "Connecting"
+        case .connected: return "Connected"
+        @unknown default: return "Unknown"
         }
     }
 }
