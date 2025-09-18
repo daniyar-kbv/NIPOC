@@ -6,7 +6,7 @@
 	<string>Devices are discovered using local network</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_uwb-demo._tcp</string>
+		<string>_ni-poc._tcp</string>
 	</array>
 	<key>NSNearbyInteractionUsageDescription</key>
 	<string>Nearby Interaction is needed to exchange direction data</string>

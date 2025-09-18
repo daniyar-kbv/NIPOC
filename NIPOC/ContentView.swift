@@ -18,7 +18,7 @@ func log(_ message: String, level: OSLogType = .info) {
 }
 
 final class PeerService: NSObject, ObservableObject {
-    private let service = "uwb-demo"
+    private let service = "ni-poc"
     private let myPeer = PeerService.makePeerID()
     private lazy var session = MCSession(peer: myPeer, securityIdentity: nil, encryptionPreference: .required)
     private lazy var advertiser = MCNearbyServiceAdvertiser(peer: myPeer, discoveryInfo: nil, serviceType: service)
@@ -48,12 +48,12 @@ final class PeerService: NSObject, ObservableObject {
             return
         }
         
-        log("Sending my discovery token", level: .info)
+        log("Sending my discovery token - tokenHash=\(token.hashValue)", level: .info)
         
         do {
             let data = try NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
             try session.send(data, toPeers: session.connectedPeers, with: .reliable)
-            log("Sent discovery token to \(session.connectedPeers.count) peer(s)", level: .info)
+            log("Sent discovery token - tokenHash=\(token.hashValue) to \(session.connectedPeers.count) peer(s)", level: .info)
         } catch {
             log("Failed to send discovery token — error=\(error.localizedDescription)", level: .error)
         }
@@ -67,7 +67,36 @@ final class PeerService: NSObject, ObservableObject {
     }
 }
 
-extension PeerService: MCSessionDelegate, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBrowserDelegate {
+extension PeerService: MCNearbyServiceAdvertiserDelegate {
+    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID,
+                    withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
+        log("Received invitation from peer=\(peerID.displayName) — accepting")
+        invitationHandler(true, session)
+    }
+
+    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
+        log("Advertiser failed to start — error=\(error.localizedDescription)", level: .error)
+    }
+}
+
+extension PeerService: MCNearbyServiceBrowserDelegate {
+    func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo: [String : String]?) {
+        if peerID != myPeer {
+            log("Found peer=\(peerID.displayName). Inviting…")
+            browser.invitePeer(peerID, to: session, withContext: nil, timeout: 20)
+        }
+    }
+    
+    func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+        log("Browser failed to start — error=\(error.localizedDescription)", level: .error)
+    }
+    
+    func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        log("Lost peer=\(peerID.displayName)")
+    }
+}
+
+extension PeerService: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         log("MCSession state changed — peer=\(peerID.displayName) state=\(stateName(state))")
         
@@ -87,7 +116,7 @@ extension PeerService: MCSessionDelegate, MCNearbyServiceAdvertiserDelegate, MCN
     
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         if let token = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: data) {
-            log("Received discovery token from peer=\(peerID.displayName)")
+            log("Received discovery token - tokenHash=\(token.hashValue) from peer=\(peerID.displayName)")
             DispatchQueue.main.async { self.onTokenReceived?(token) }
         }
     }
@@ -95,29 +124,6 @@ extension PeerService: MCSessionDelegate, MCNearbyServiceAdvertiserDelegate, MCN
     func session(_ session: MCSession, didReceive stream: InputStream, withName: String, fromPeer: MCPeerID) { }
     func session(_ session: MCSession, didStartReceivingResourceWithName: String, fromPeer: MCPeerID, with: Progress) { }
     func session(_ session: MCSession, didFinishReceivingResourceWithName: String, fromPeer: MCPeerID, at: URL?, withError: Error?) { }
-
-    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID,
-                    withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        log("Received invitation from peer=\(peerID.displayName) — accepting")
-        invitationHandler(true, session)
-    }
-
-    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
-        log("Advertiser failed to start — error=\(error.localizedDescription)", level: .error)
-    }
-
-    func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo: [String : String]?) {
-        if peerID != myPeer {
-            log("Found peer=\(peerID.displayName). Inviting…")
-            browser.invitePeer(peerID, to: session, withContext: nil, timeout: 20)
-        }
-    }
-    
-    func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
-        log("Browser failed to start — error=\(error.localizedDescription)", level: .error)
-    }
-    
-    func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
 }
 
 final class NIManager: NSObject, ObservableObject {
@@ -129,7 +135,10 @@ final class NIManager: NSObject, ObservableObject {
         
         session.delegate = self
         
-        if let _ = session.discoveryToken {
+        let caps = NISession.deviceCapabilities
+        log("NISession device capabilities - supportsPreciseDistanceMeasurement=\(caps.supportsPreciseDistanceMeasurement), supportsCameraAssistance=\(caps.supportsCameraAssistance), supportsDirectionMeasurement=\(caps.supportsDirectionMeasurement), supportsExtendedDistanceMeasurement=\(caps.supportsExtendedDistanceMeasurement)", level: .info)
+        
+        if session.discoveryToken != nil {
             log("My discoveryToken is available on init")
         }
         
@@ -143,15 +152,6 @@ final class NIManager: NSObject, ObservableObject {
             log("onPeerConnected — attempting to send my discovery token")
             self.peerService.send(token: token)
         }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            log("Will retry sending discovery token later")
-            
-            if let token = self?.session.discoveryToken {
-                log("Sending my discovery token")
-                self?.peerService.send(token: token)
-            }
-        }
     }
 
     private func run(with peerToken: NIDiscoveryToken) {
@@ -164,9 +164,18 @@ final class NIManager: NSObject, ObservableObject {
 extension NIManager: NISessionDelegate {
     func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
         guard let obj = nearbyObjects.first else { return }
-        let distance = String(format: "%.2f", obj.distance ?? -1)
-        let direction = obj.direction ?? simd_float3(repeating: -1)
-        log("Did update nearby objects — distance=\(distance)m direction=[\(String(format:"%.2f", direction.x)), \(String(format:"%.2f", direction.y)), \(String(format:"%.2f", direction.z))]")
+        if let distance = obj.distance,
+           let direction = obj.direction {
+            log(String(format: "Nearby object updated — distance=%.2f m, direction=(x: %.2f, y: %.2f, z: %.2f)",
+                       distance, direction.x, direction.y, direction.z), level: .info)
+        } else if let distance = obj.distance {
+            log(String(format: "Nearby object updated — distance=%.2f m", distance), level: .info)
+        } else if let direction = obj.direction {
+            log(String(format: "Nearby object updated — direction=(x: %.2f, y: %.2f, z: %.2f)",
+                          direction.x, direction.y, direction.z), level: .info)
+        } else {
+            log("Nearby object updated — no distance or direction info", level: .info)
+        }
     }
 
     func sessionWasSuspended(_ session: NISession) {
